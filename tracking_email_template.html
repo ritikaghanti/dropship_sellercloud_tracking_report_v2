@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html>
+  <body style="font-family: Arial, sans-serif; color: #333333; font-size: 16px; line-height: 1.5; padding: 20px;">
+
+    <div style="text-align: center; margin-bottom: 30px;">
+      <img src="https://krameramerica.hosted-by-files.com/Images_Smartliner/kramer_assets/logo.png"
+           alt="Company Logo"
+           style="max-width: 500px; height: auto;">
+    </div>
+
+    <p>
+      We are writing to confirm that tracking details are now available for the following purchase orders:
+    </p>
+
+    <ul>
+      {% for order in orders %}
+        <li>{{ order }}</li>
+      {% endfor %}
+    </ul>
+
+    <p>These orders are now in queue for shipment.</p>
+
+    <p>Thank you for your continued partnership.</p>
+
+    <p>
+      Questions? Feel free to reply to this email — your message will be sent directly to our team at
+      <a href="mailto:orders@krameramerica.com">orders@krameramerica.com</a>.
+    </p>
+
+    <p style="font-size: 12px; color: #888888; margin-top: 30px;">
+      This email was sent from an unmonitored address. However, replies are automatically forwarded to our support inbox.
+      <br><br>
+      If you’d like to opt out of these notifications, please email
+      <a href="mailto:orders@krameramerica.com">orders@krameramerica.com</a> with your request.
+    </p>
+  </body>
+</html>
