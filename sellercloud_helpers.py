@@ -1,67 +1,113 @@
-from typing import Dict, Iterable
+from __future__ import annotations
+from typing import Dict, List, Tuple
+from collections import defaultdict
 from utils import map_order_status
 
-def get_orders_by_ids(sc_api, sellercloud_order_ids: Iterable[str]) -> Dict[str, dict]:
+def get_orders_by_ids(sc_api, orders: List[dict]) -> Tuple[Dict[str, List[dict]], List[dict], List[dict], List[dict]]:
     """
-    Call SellerCloud API for each order_id.
-    Returns: {order_id: {"order_status": ..., "tracking_number": ..., "tracking_date": ...}}
-    """
-    results: Dict[str, dict] = {}
+    Input:
+      orders: flat list from DropshipDb.get_untracked_orders()
 
-    for order_id in sellercloud_order_ids:
-        resp = sc_api.get_order(order_id)
-        if not resp.ok:
-            # You can log and continue or raise — choose what fits ops best
-            print(f"Failed to fetch order {order_id}: {resp.status_code} {resp.text}")
+    Output:
+      by_dropshipper: { "AAG": [ merged_order, ... ], ... }  # only NOT Cancelled/OnHold/ProblemOrder
+      cancelled:      [ merged_order, ... ]
+      on_hold:        [ merged_order, ... ]
+      problem:        [ merged_order, ... ]
+
+    merged_order = original DB order + SC fields:
+      sc_status (mapped), sc_status_raw (raw), tracking_number, tracking_date
+    """
+    by_dropshipper: Dict[str, List[dict]] = defaultdict(list)
+    cancelled: List[dict] = []
+    on_hold: List[dict] = []
+    problem: List[dict] = []
+
+    for order in orders:
+        sc_id = order.get("sellercloud_order_id")
+        if not sc_id:
+            # If DB row doesn't include SC ID, skip or resolve by PO#
             continue
 
-        order = resp.json()
-        order_id = (
-        order.get("OrderID")
-        or order.get("Id")
-        or order.get("ID") #Need to check exact name
-        )
-        
-        # Status code path can vary
-        statuses = order.get("Statuses") or {}
-        status_code = (
+        resp = sc_api.get_order(str(sc_id))
+        if not resp.ok:
+            print(f"Failed to fetch order {sc_id}: {resp.status_code} {resp.text}")
+            continue
+
+        data = resp.json()
+
+        # ---- RAW STATUS (from SellerCloud payload, not the DB order) ----
+        statuses = data.get("Statuses") or {}
+        raw_status = (
             statuses.get("OrderStatus")
-            or statuses.get("StatusCode")
-            or statuses.get("Code")
-            or None
+            or statuses.get("Status")
+            or data.get("Status")
+            or data.get("OrderStatus")
         )
-        
-        # Tracking number: prefer first package if present
-        packages = order.get("OrderPackages") or order.get("Packages") or []
+        sc_order_id = data.get("OrderID") or data.get("Id") or data.get("ID")
+        print(f"[SC STATUS] OrderID={sc_order_id} raw={raw_status!r} type={type(raw_status).__name__}")
+
+        # Map raw status to our normalized buckets
+        status = map_order_status(raw_status)
+
+        # ---- Tracking extraction with a few fallbacks ----
         tracking_number = None
+
+        # Try top-level packages
+        packages = data.get("OrderPackages") or data.get("Packages") or []
         if isinstance(packages, list) and packages:
-            # Try common variants
             pkg0 = packages[0] or {}
             tracking_number = (
                 pkg0.get("TrackingNumber")
                 or pkg0.get("trackingNumber")
-                or pkg0.get("Tracking")  # fallback if structure differs
+                or pkg0.get("Tracking")
+                or pkg0.get("tracking")
             )
-            
-        # Tracking date: prefer ShippingDetails.ShipDate; fallback to another plausible field
-        ship_details = order.get("ShippingDetails") or {}
+
+        # Try shipments if packages didn't work
+        if not tracking_number:
+            shipments = data.get("Shipments") or data.get("OrderShipments") or []
+            if isinstance(shipments, list) and shipments:
+                s0 = shipments[0] or {}
+                tracking_number = (
+                    s0.get("TrackingNumber")
+                    or s0.get("trackingNumber")
+                    or s0.get("Tracking")
+                )
+                if not tracking_number:
+                    spkgs = s0.get("Packages") or []
+                    if isinstance(spkgs, list) and spkgs:
+                        sp0 = spkgs[0] or {}
+                        tracking_number = (
+                            sp0.get("TrackingNumber")
+                            or sp0.get("trackingNumber")
+                            or sp0.get("Tracking")
+                        )
+
+        # Tracking date (keep your original preference order)
+        ship_details = data.get("ShippingDetails") or {}
         tracking_date = (
             ship_details.get("ShipDate")
-            or order.get("ShipDate")
-            or order.get("OrderDate")
-            or order.get("DateCreated")
+            or data.get("ShipDate")
+            or data.get("OrderDate")
+            or data.get("DateCreated")
         )
-        
-        if order_id is None:
-        # If we truly can't identify the order, log and skip
-            print(f"GET_ORDER returned payload without usable OrderID: {order}")
-            continue
 
-        # Adjust keys to your exact API response
-        results[order_id] = {
-            "order_status":   map_order_status(status_code),
+        merged = {
+            **order,  # DB fields
+            "sc_status": status,
+            "sc_status_raw": raw_status,
             "tracking_number": tracking_number,
-            "tracking_date":   tracking_date,
+            "tracking_date": tracking_date,
         }
 
-    return results
+        if status == "Cancelled":
+            cancelled.append(merged)
+        elif status == "OnHold":
+            on_hold.append(merged)
+        elif status == "ProblemOrder":
+            problem.append(merged)
+        else:
+            code = order.get("dropshipper_code") or "UNKNOWN"
+            by_dropshipper[code].append(merged)
+
+    return dict(by_dropshipper), cancelled, on_hold, problem

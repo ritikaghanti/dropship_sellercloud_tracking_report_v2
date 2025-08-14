@@ -1,0 +1,86 @@
+from __future__ import annotations
+from typing import Dict, List, Tuple, DefaultDict
+from collections import defaultdict
+from utils import map_order_status  # your existing mapper
+
+
+def get_orders_by_ids(sc_api, orders: List[dict]) -> Tuple[Dict[str, List[dict]], List[dict], List[dict], List[dict]]:
+    """
+    Input:
+      orders: flat list from DropshipDb.get_untracked_orders()
+
+    Output (tuple):
+      by_dropshipper: { "AAG": [ merged_order, ... ], "NEAA": [ ... ], ... }   # Only "good" (not Cancelled/OnHold/ProblemOrder)
+      cancelled:      [ merged_order, ... ]
+      on_hold:        [ merged_order, ... ]
+      problem:        [ merged_order, ... ]
+
+    Each merged_order contains ALL relevant DB fields plus these SellerCloud fields:
+      - sc_status (mapped string or None)
+      - sc_status_code (raw)
+      - tracking_number
+      - tracking_date
+    """
+    by_dropshipper: DefaultDict[str, List[dict]] = defaultdict(list)
+    cancelled: List[dict] = []
+    on_hold: List[dict] = []
+    problem: List[dict] = []
+
+    for order in orders:
+        sc_id = order.get("sellercloud_order_id")
+        if not sc_id:
+            continue
+
+        resp = sc_api.get_order(str(sc_id))  # implement .get_order(order_id) in your API class
+        if not resp.ok:
+            print(f"Failed to fetch order {sc_id}: {resp.status_code} {resp.text}")
+            continue
+
+        data = resp.json()
+
+        # Extract status
+        statuses = data.get("Statuses") or {}
+        raw_code = (
+            statuses.get("OrderStatus")
+        )
+        status = map_order_status(raw_code)
+
+        # Extract tracking
+        packages = data.get("OrderPackages") or data.get("Packages") or []
+        tracking_number = None
+        if isinstance(packages, list) and packages:
+            pkg0 = packages[0] or {}
+            tracking_number = (
+                pkg0.get("TrackingNumber")
+            )
+
+        ship_details = data.get("ShippingDetails") or {}
+        tracking_date = (
+            ship_details.get("ShipDate")
+            or data.get("ShipDate")
+            or data.get("OrderDate")
+            or data.get("DateCreated")
+        )
+
+        # Merge DB + SC into a single object
+        merged = {
+            **order,  # all DB fields and items
+            "sc_status": status,
+            "sc_status_code": raw_code,
+            "tracking_number": tracking_number,
+            "tracking_date": tracking_date,
+        }
+
+        # Partition by status
+        if status == "Cancelled":
+            cancelled.append(merged)
+        elif status == "OnHold":
+            on_hold.append(merged)
+        elif status == "ProblemOrder":
+            problem.append(merged)
+        else:
+            # Good to proceed → bucket by dropshipper
+            code = order.get("dropshipper_code") or "UNKNOWN"
+            by_dropshipper[code].append(merged)
+
+    return dict(by_dropshipper), cancelled, on_hold, problem
