@@ -3,11 +3,8 @@ from typing import List, Dict
 import pyodbc
 from kramer_functions import AzureSecrets
 
+
 def _parse_sku(s: str) -> Dict[str, object]:
-    """
-    Accept SKU formats like: A0012/B0012 OR A0012 OR A0012/B00012/C0012/D0012
-    Store both raw and split components.
-    """
     s = (s or "").strip()
     parts = [p.strip() for p in s.split("/") if p.strip()]
     return {"sku_raw": s, "sku_parts": parts}
@@ -16,7 +13,9 @@ def _parse_sku(s: str) -> Dict[str, object]:
 class DropshipDb:
     def __init__(self):
         self.secrets = AzureSecrets()
-        self.connection_string = self.secrets.get_connection_string("DropshipSellerCloudTest")
+        self.connection_string = self.secrets.get_connection_string(
+            "DropshipSellerCloudTest"
+        )
         self.conn = pyodbc.connect(self.connection_string)
 
     def close(self):
@@ -31,6 +30,7 @@ class DropshipDb:
                 SELECT
                     d.sellercloud_customer_id,
                     d.code AS dropshipper_code,
+                    d.ftp_folder_name AS ftp_folder_name,
                     po.id,
                     po.purchase_order_number,
                     po.sellercloud_order_id,
@@ -89,8 +89,9 @@ class DropshipDb:
                         "id": po_id,
                         "sellercloud_customer_id": r["sellercloud_customer_id"],
                         "dropshipper_code": r["dropshipper_code"],
+                        "ftp_folder_name": r["ftp_folder_name"],
                         "purchase_order_number": r["purchase_order_number"],
-                        "sellercloud_order_id": r["sellercloud_order_id"],   # ✅ now present
+                        "sellercloud_order_id": r["sellercloud_order_id"],
                         "date_added": r["date_added"],
                         "customer_first_name": r["customer_first_name"],
                         "customer_last_name": r["customer_last_name"],
@@ -110,31 +111,45 @@ class DropshipDb:
                     }
 
                 sku_bits = _parse_sku(r["sku"])
-                by_id[po_id]["items"].append({
-                    "sku": sku_bits["sku_raw"],
-                    "sku_parts": sku_bits["sku_parts"],
-                    "quantity": r["quantity"],
-                    "price": r["price"],
-                    "shipping_cost": r["shipping_cost"],
-                })
+                by_id[po_id]["items"].append(
+                    {
+                        "sku": sku_bits["sku_raw"],
+                        "sku_parts": sku_bits["sku_parts"],
+                        "quantity": r["quantity"],
+                        "price": r["price"],
+                        "shipping_cost": r["shipping_cost"],
+                    }
+                )
 
             return list(by_id.values())
 
         except Exception as e:
             print(f"Error while getting untracked orders: {e}")
             raise
-        
-    def save_tracking_data(self, by_dropshipper: Dict[str, List[dict]]) -> int:
-        """
-        Persist tracking info back to the DB.
-        by_dropshipper: { "AAG": [order_dict, ...], ... }
-        Each order is expected to contain:
-        - purchase_order_number (str)
-        - tracking_number (str)
-        - tracking_date (str/datetime or None)
 
-        Returns: number of rows updated.
-        """
+    def turning_on_is_cancelled_status(self, purchase_order_number: str) -> int:
+        cur = self.conn.cursor()
+        cur.execute(
+            (purchase_order_number,),
+        )
+        self.conn.commit()
+        return cur.rowcount
+
+    def turning_on_is_backorder_status(self, purchase_order_number: str) -> int:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            UPDATE PurchaseOrders
+            SET on_hold = 1
+            WHERE purchase_order_number = ?
+            AND (on_hold = 0 OR on_hold IS NULL)
+            """,
+            (purchase_order_number,),
+        )
+        self.conn.commit()
+        return cur.rowcount
+
+    def save_tracking_data(self, by_dropshipper: Dict[str, List[dict]]) -> int:
         cursor = self.conn.cursor()
         updated = 0
 
@@ -148,9 +163,6 @@ class DropshipDb:
                 po = (order or {}).get("purchase_order_number")
                 if not po:
                     continue
-
-                # If your schema uses a different column for date (e.g., ShipDate),
-                # change 'tracking_date' below accordingly.
                 cursor.execute(
                     """
                     UPDATE PurchaseOrders

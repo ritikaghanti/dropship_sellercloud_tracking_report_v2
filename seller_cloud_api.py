@@ -2,8 +2,6 @@ import requests
 from kramer_functions import AzureSecrets
 
 class SellerCloudAPI():
-    """A class to interact with the SellerCloud API."""
-
     def __init__(self):
         self.base_url = "https://krameramerica.api.sellercloud.us/rest/api/"
         self.access_token = self.get_token()

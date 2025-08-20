@@ -5,27 +5,28 @@ from pathlib import Path
 from jinja2 import Template
 from kramer_functions import GmailNotifier, AzureSecrets
 
+
 class EmailHelper:
-    def __init__(self, template_name: str = "tracking_email_template.html", test_recipient: str | None = None):
+    def __init__(
+        self,
+        template_name: str = "tracking_email_template.html",
+        test_recipient: str | None = None,
+    ):
         self.notifier = GmailNotifier()
         self.secrets = AzureSecrets()
         self.it_email = self.secrets.get_secret("email-address-it-department")
         self.reply_to = "orders@krameramerica.com"
-        self.test_recipient = test_recipient  # if set, all emails go only to this address
-
+        self.test_recipient = test_recipient
 
         self.template_path = Path(__file__).parent / template_name
         if not self.template_path.exists():
-            # You can change this to raise if you want hard failure
             print(f"[EmailHelper] Warning: template not found at {self.template_path}")
-
 
     def _resolve_recipients(self, real_recipients: List[str]) -> List[str]:
         return [self.test_recipient] if self.test_recipient else real_recipients
 
     def _load_template(self) -> Template:
         if not self.template_path.exists():
-            # minimal inline fallback if file missing
             fallback = """
             <!DOCTYPE html>
             <html><body>
@@ -37,18 +38,14 @@ class EmailHelper:
         with open(self.template_path, "r", encoding="utf-8") as f:
             return Template(f.read())
 
-
     def send_tracking_confirmation(self, orders_by_email: Dict[str, List[str]]) -> None:
 
         if not orders_by_email:
             return
-
         template = self._load_template()
-
         for email, po_list in orders_by_email.items():
             if not po_list:
                 continue
-
             html = template.render(orders=po_list)
             recipients = self._resolve_recipients([email])
 
@@ -107,5 +104,34 @@ class EmailHelper:
             body=error_message,
             recipients=recipients,
             machine_info=True,
+            discord_notification=False,
+        )
+
+    def send_problem_orders_alert(self, problem_orders: List[dict]) -> None:
+        if not problem_orders:
+            return
+
+        lines = []
+        for o in problem_orders:
+            po = o.get("purchase_order_number")
+            sc = o.get("sellercloud_order_id")
+            raw = o.get("sc_status_raw")
+            lines.append(f"PO={po}  SC={sc}  raw_status={raw}")
+
+        subject = "[Tracking] Problem orders detected"
+        body = (
+            "The following orders returned a ProblemOrder status from SellerCloud:\n\n"
+            + "\n".join(lines)
+            + "\n\nNo tracking file was generated for these. Please review in SellerCloud."
+        )
+
+        recipients = self._resolve_recipients([self.it_email])
+        self.notifier.send_notification(
+            subject=subject,
+            body=body,
+            recipients=recipients,
+            html_body=None,
+            reply_to=self.reply_to,
+            machine_info=False,
             discord_notification=False,
         )
